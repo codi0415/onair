@@ -12,8 +12,8 @@
 | 항목 | 상태 |
 |---|---|
 | 프로덕션 | https://onair-three-beta.vercel.app (정상) |
-| Vercel 프로젝트 | `onair` (`prj_KLIOkVuNoV3WBojP6RqEeSg6LuIT`) |
-| Supabase 프로젝트 | `ushs-on-air` (`vcvzcxhqgioaxdwheacc`, 서울 리전, ACTIVE_HEALTHY) |
+| Vercel 프로젝트 | `onair` (프로젝트 ID는 로컬 `.vercel/project.json` 또는 Vercel 대시보드에서) |
+| Supabase 프로젝트 | `ushs-on-air` (서울 리전 / 프로젝트 ref는 Supabase 대시보드에서) |
 | 중복 방지 마이그레이션 | ✅ 적용 완료 (unique index 2개 확인) |
 | 학생 신청 | 0건 (아직 공지 전) |
 | 검색 캐시 | iTunes 209건 / Deezer 124건 예열됨 |
@@ -95,6 +95,7 @@ Resend 무료 티어는 하루 100통/월 3,000통이라, 신청 접수 시점�
 가장 신뢰할 수 있는 지표는 **DB 직접 조회**입니다 (Supabase MCP 사용):
 
 ```sql
+-- 프로젝트 ref는 Supabase 대시보드에서 확인
 select
   (select count(*) from song_requests) as 신청누적,
   (select count(distinct student_id) from song_requests) as 학생수,
@@ -106,6 +107,15 @@ select
 이게 뜨면 검색 품질이 떨어지기 시작했다는 뜻입니다. 대응 옵션: 캐시 TTL 연장, `RATE_LIMIT_PER_MINUTE` 상향(Vercel은 인스턴스마다 IP가 달라 실제 여유가 더 있음).
 
 ---
+
+## 5-1. 저장소가 공개라는 점 (보안)
+
+이 저장소는 공개되어 있습니다. 즉 **방송부 페이지 경로(`/admin`)와 인증 방식이 누구에게나 보입니다.**
+인증은 공유 비밀번호 하나(`x-admin-password` 헤더)뿐이고, **시도 횟수 제한이 없습니다.**
+
+- `ADMIN_PASSWORD`는 추측하기 어려운 값이어야 합니다. 짧거나 규칙적인 값(`onair2026` 류)은 위험합니다.
+- 비밀번호가 뚫리면 신청 데이터 전체 삭제까지 가능합니다(데이터 관리 탭).
+- 개선하려면: 인증 실패 시 지연/횟수 제한 추가, 또는 방송부 계정을 Supabase Auth로 전환.
 
 ## 6. 함정 (모르면 시간 날림)
 
