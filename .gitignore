@@ -1,0 +1,9 @@
+node_modules
+.next
+.vercel
+.DS_Store
+
+# 실제 값이 들어있는 환경변수 파일은 절대 커밋하지 않습니다.
+.env*
+# 단, 값이 비어있는 예시 파일은 함께 공유합니다.
+!.env.example

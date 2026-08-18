@@ -1,0 +1,101 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap");
+
+:root {
+  /* 색상: 새벽 방송실 컨셉 - 짙은 네이비에서 여명의 앰버로 */
+  --ink: #10151f;          /* 배경 - 짙은 새벽 네이비 */
+  --ink-soft: #1a2233;     /* 카드 배경 */
+  --ink-line: #2a3448;     /* 구분선 */
+  --ink-line-strong: #3c4a66; /* 구분선 - 마우스 오버 등 강조 상태 */
+  --paper: #eef1f6;        /* 본문 텍스트(밝은 회백) */
+  --paper-dim: #9aa5b8;    /* 보조 텍스트 */
+  --signal: #ff5a4e;       /* ON AIR 시그널 레드 */
+  --dawn: #ffb454;         /* 여명 앰버 - 포인트 */
+  --ok: #5fd0a7;           /* 승인/성공 */
+
+  --font-display: "Space Grotesk", sans-serif;
+  --font-body: "Manrope", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+}
+
+/* 버튼 공통 반응.
+   화면 스타일이 대부분 인라인 객체라 :hover / :active를 인라인으로는 줄 수 없어서,
+   눌리는 느낌만 여기서 한 번에 걸어 둡니다. 개별 색상은 각 화면의 styles가 계속 담당합니다. */
+button {
+  font-family: inherit;
+  transition: filter 0.15s ease, transform 0.1s ease, background 0.15s ease,
+    border-color 0.15s ease, color 0.15s ease;
+}
+
+button:not(:disabled):hover {
+  filter: brightness(1.1);
+}
+
+button:not(:disabled):active {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+input {
+  font-family: inherit;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+/* 입력칸은 포커스 시 테두리가 포인트 색으로 바뀌어 지금 어디에 쓰고 있는지 명확해집니다. */
+input:focus {
+  border-color: var(--dawn);
+}
+
+/* 카드: 마우스를 올리면 테두리만 살짝 밝아지도록 (배경까지 바뀌면 목록이 산만해짐) */
+.onair-card {
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.onair-card:hover {
+  border-color: var(--ink-line-strong);
+}
+
+::selection {
+  background: var(--signal);
+  color: white;
+}
+
+/* 어두운 배경에 기본 스크롤바가 흰색으로 뜨는 걸 맞춰줍니다. */
+* {
+  scrollbar-color: var(--ink-line) transparent;
+  scrollbar-width: thin;
+}
+
+/* 접근성: 포커스 표시 */
+:focus-visible {
+  outline: 2px solid var(--dawn);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
