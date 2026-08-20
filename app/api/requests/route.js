@@ -4,6 +4,7 @@ import { checkMusixmatchExplicit } from "@/lib/musixmatch";
 import { checkKeywordBlocklist } from "@/lib/keywordFilter";
 import { normalizeUrl } from "@/lib/validate";
 import { getDailyUsage, DAILY_LIMIT } from "@/lib/dailyQuota";
+import { dedupeBySong } from "@/lib/songKey";
 
 const STUDENT_ID_PATTERN = /^[a-zA-Z0-9._-]{2,30}$/;
 const MAX_TEXT_LENGTH = 200; // 곡명/아티스트명 길이 상한 (직접 입력 신청 대비)
@@ -193,7 +194,9 @@ export async function GET(request) {
   }
 
   if (scope === "upcoming") {
-    const sanitized = data.map((r) => ({
+    // 같은 곡을 여러 명이 신청하면 전원 승인되지만 방송은 한 번만 나갑니다.
+    // 목록에 같은 곡이 여러 줄 뜨면 학생 입장에서 오해하므로 곡 단위로 한 번만 보여줍니다.
+    const sanitized = dedupeBySong(data).map((r) => ({
       id: r.id,
       title: r.title,
       artist: r.artist,

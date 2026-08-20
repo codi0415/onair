@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useIsMobile } from "@/lib/useIsMobile";
 import AudioPreview from "@/app/components/AudioPreview";
+import { groupBySong, dedupeBySong } from "@/lib/songKey";
 
 const FILTERS = [
   { key: "pending", label: "검토 대기" },
@@ -14,6 +15,56 @@ const FILTERS = [
 ];
 
 const PW_STORAGE_KEY = "onair_admin_pw";
+
+// 곡 묶음 정렬 기준. 목록 탭과 달력 배정 창에서 같은 옵션을 씁니다.
+// 기본값을 "등록순"으로 둔 이유: 먼저 신청한 곡이 먼저 배정되는 게 학생 입장에서 공평합니다.
+const SORT_OPTIONS = [
+  { key: "oldest", label: "등록순" },
+  { key: "popular", label: "인기순" },
+  { key: "recent", label: "최신순" },
+  { key: "title", label: "곡명순" },
+];
+
+function sortGroups(groups, sortKey) {
+  const first = (g) => new Date(g[0].created_at).getTime();
+  const sorted = [...groups];
+  switch (sortKey) {
+    case "popular":
+      // 신청자 많은 순. 같은 인원이면 먼저 신청된 곡이 앞으로.
+      sorted.sort((a, b) => b.length - a.length || first(a) - first(b));
+      break;
+    case "recent":
+      sorted.sort((a, b) => first(b) - first(a));
+      break;
+    case "title":
+      sorted.sort((a, b) => (a[0].title || "").localeCompare(b[0].title || "", "ko"));
+      break;
+    case "oldest":
+    default:
+      sorted.sort((a, b) => first(a) - first(b));
+  }
+  return sorted;
+}
+
+function SortBar({ value, onChange, label = "정렬" }) {
+  return (
+    <div style={styles.sortBar}>
+      <span style={styles.sortLabel}>{label}</span>
+      {SORT_OPTIONS.map((o) => (
+        <button
+          key={o.key}
+          onClick={() => onChange(o.key)}
+          style={{
+            ...styles.sortButton,
+            ...(value === o.key ? styles.sortButtonActive : {}),
+          }}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 // 서버 쪽 상한과 같은 값입니다. 여기서 미리 막아야 방송부가 길게 써 놓고
 // 저장 버튼을 누른 뒤에야 거절당하는 일이 없습니다.
@@ -149,6 +200,7 @@ function Dashboard({ password, onAuthFail }) {
   // 방송부가 들어오자마자 "지금 뭘 해야 하는지"부터 보이도록 대시보드를 첫 화면으로 둡니다.
   const [view, setView] = useState("dashboard"); // "dashboard" | "list" | "calendar" | "manual" | "blocklist" | "danger"
   const [loadError, setLoadError] = useState(null);
+  const [listSort, setListSort] = useState("oldest"); // 목록 탭 정렬 기준
 
   // 매 렌더마다 새 객체를 만들면 useCallback 의존성이 계속 바뀌므로 password 기준으로 고정합니다.
   const authHeaders = useMemo(() => ({ "x-admin-password": password }), [password]);
@@ -206,28 +258,42 @@ function Dashboard({ password, onAuthFail }) {
     return () => clearInterval(interval);
   }, [loadRequests, loadBlocklist]);
 
-  async function updateRequest(id, payload) {
-    try {
-      await adminFetch(`/api/admin/requests/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      setLoadError(null);
-    } catch (err) {
-      // 실패했는데 성공한 것처럼 목록만 새로고침되면 방송부가 처리됐다고 착각합니다.
-      setLoadError(`처리에 실패했습니다: ${err.message}`);
+  // 같은 곡을 여러 학생이 신청한 경우 한 카드로 묶여 있으므로, 처리도 그 그룹 전체에 적용합니다.
+  // 신청자마다 각각 결과 메일을 받아야 하니 건별로 PATCH를 보냅니다(보통 1~3건).
+  async function updateRequests(ids, payload) {
+    const list = Array.isArray(ids) ? ids : [ids];
+    const failed = [];
+    for (const id of list) {
+      try {
+        await adminFetch(`/api/admin/requests/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      } catch (err) {
+        failed.push(err.message);
+      }
     }
+    // 실패했는데 성공한 것처럼 목록만 새로고침되면 방송부가 처리됐다고 착각합니다.
+    setLoadError(
+      failed.length
+        ? `${list.length}건 중 ${failed.length}건 처리 실패: ${failed[0]}`
+        : null
+    );
     loadRequests();
   }
 
-  async function deleteRequest(id) {
-    try {
-      await adminFetch(`/api/admin/requests/${id}`, { method: "DELETE" });
-      setLoadError(null);
-    } catch (err) {
-      setLoadError(`삭제에 실패했습니다: ${err.message}`);
+  async function deleteRequests(ids) {
+    const list = Array.isArray(ids) ? ids : [ids];
+    const failed = [];
+    for (const id of list) {
+      try {
+        await adminFetch(`/api/admin/requests/${id}`, { method: "DELETE" });
+      } catch (err) {
+        failed.push(err.message);
+      }
     }
+    setLoadError(failed.length ? `삭제 실패: ${failed[0]}` : null);
     loadRequests();
   }
 
@@ -237,6 +303,9 @@ function Dashboard({ password, onAuthFail }) {
       : filter === "all"
       ? requests
       : requests.filter((r) => r.status === filter);
+
+  // 같은 곡을 신청한 건들을 한 묶음으로. 방송은 한 번만 나가므로 카드도 하나여야 합니다.
+  const groups = filtered === null ? null : sortGroups(groupBySong(filtered), listSort);
 
   const TABS = [
     { key: "dashboard", label: "대시보드" },
@@ -283,7 +352,7 @@ function Dashboard({ password, onAuthFail }) {
       {view === "dashboard" && (
         <DashboardOverview
           requests={requests}
-          onUpdate={updateRequest}
+          onUpdate={updateRequests}
           onGoToList={goToList}
           onGoToView={setView}
           isMobile={isMobile}
@@ -295,7 +364,7 @@ function Dashboard({ password, onAuthFail }) {
       )}
 
       {view === "calendar" && (
-        <CalendarView requests={requests || []} onUpdate={updateRequest} isMobile={isMobile} />
+        <CalendarView requests={requests || []} onUpdate={updateRequests} isMobile={isMobile} />
       )}
 
       {view === "danger" && (
@@ -335,18 +404,29 @@ function Dashboard({ password, onAuthFail }) {
             ))}
           </nav>
 
+          {groups && groups.length > 1 && (
+            <SortBar value={listSort} onChange={setListSort} />
+          )}
+
           {filtered === null && <p style={styles.hint}>불러오는 중…</p>}
           {filtered && filtered.length === 0 && (
             <p style={styles.hint}>해당 상태의 신청이 없습니다.</p>
           )}
+          {groups && groups.length < filtered.length && (
+            <p style={styles.groupNotice}>
+              같은 곡을 여러 명이 신청한 건은 하나로 묶어서 보여줍니다 —
+              신청 {filtered.length}건이 곡 {groups.length}개로 정리됐습니다.
+              승인·반려는 묶인 신청 전체에 한 번에 적용됩니다.
+            </p>
+          )}
 
           <ul style={styles.list}>
-            {filtered?.map((r) => (
+            {groups?.map((group) => (
               <RequestCard
-                key={r.id}
-                request={r}
-                onUpdate={updateRequest}
-                onDelete={deleteRequest}
+                key={group[0].id}
+                group={group}
+                onUpdate={updateRequests}
+                onDelete={deleteRequests}
                 isMobile={isMobile}
               />
             ))}
@@ -395,16 +475,33 @@ function DashboardOverview({ requests, onUpdate, onGoToList, onGoToView, isMobil
   // 이미 승인/반려한 곡까지 세면 "처리해야 할 일"이 아닌데도 숫자가 줄지 않습니다.
   const needsReview = pending.filter((r) => r.needs_review);
 
-  const todaySongs = scheduled.filter((r) => r.scheduled_date === today);
-  const upcoming = scheduled
-    .filter((r) => r.scheduled_date && r.scheduled_date > today)
-    .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date));
+  // 여러 명이 신청한 곡은 전원 승인되므로, 화면에는 곡 단위로 한 번만 보여야 합니다.
+  const todaySongs = dedupeBySong(scheduled.filter((r) => r.scheduled_date === today));
+  const upcoming = dedupeBySong(
+    scheduled
+      .filter((r) => r.scheduled_date && r.scheduled_date > today)
+      .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date))
+  );
   // 날짜가 지났는데 아직 "방송 완료" 처리를 안 한 곡. 그냥 두면 예정 목록에 계속 쌓입니다.
-  const overdue = scheduled
-    .filter((r) => r.scheduled_date && r.scheduled_date < today)
-    .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date));
+  const overdue = dedupeBySong(
+    scheduled
+      .filter((r) => r.scheduled_date && r.scheduled_date < today)
+      .sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date))
+  );
 
-  const recentPending = [...pending].slice(0, 5); // 이미 최신순으로 내려옴
+  // 검토 대기도 곡 단위로 묶어서 보여줍니다. 같은 곡이 여러 줄 뜨면 몇 곡이 밀렸는지 알기 어렵습니다.
+  const pendingGroups = groupBySong(pending);
+  const recentPending = pendingGroups.slice(0, 5);
+
+  // 인기 신청곡: 여러 명이 신청한 곡을 신청자 수 순으로.
+  // 방송부가 "많이 원하는 곡"을 먼저 배정할 수 있게 하고,
+  // 동시에 중복 신청을 손으로 반려할 이유 자체를 없앱니다.
+  const popular = groupBySong(
+    requests.filter((r) => r.status !== "rejected")
+  )
+    .filter((g) => g.length > 1)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 5);
 
   return (
     <div style={styles.dash}>
@@ -488,7 +585,7 @@ function DashboardOverview({ requests, onUpdate, onGoToList, onGoToView, isMobil
                 request={r}
                 highlight
                 action={
-                  <button style={styles.rowButton} onClick={() => onUpdate(r.id, { status: "played" })}>
+                  <button style={styles.rowButton} onClick={() => onUpdate(ids, { status: "played" })}>
                     방송 완료
                   </button>
                 }
@@ -522,7 +619,7 @@ function DashboardOverview({ requests, onUpdate, onGoToList, onGoToView, isMobil
                 request={r}
                 meta={`${friendlyDate(r.scheduled_date)} 예정이었음`}
                 action={
-                  <button style={styles.rowButton} onClick={() => onUpdate(r.id, { status: "played" })}>
+                  <button style={styles.rowButton} onClick={() => onUpdate(ids, { status: "played" })}>
                     방송 완료
                   </button>
                 }
@@ -531,33 +628,58 @@ function DashboardOverview({ requests, onUpdate, onGoToList, onGoToView, isMobil
           </Panel>
         )}
 
+        {/* 인기 신청곡 — 여러 명이 원한 곡을 먼저 배정할 수 있게 */}
+        {popular.length > 0 && (
+          <Panel title="인기 신청곡" badge={`${popular.length}곡`}>
+            {popular.map((g) => (
+              <SongRow
+                key={g[0].id}
+                request={g[0]}
+                meta={`${g.length}명이 신청`}
+                warn={g.some((x) => x.needs_review)}
+              />
+            ))}
+          </Panel>
+        )}
+
         {/* 최근 신청 - 여기서 바로 승인까지 끝낼 수 있게 */}
         <Panel
           title="최근 신청"
-          badge={`${pending.length}건 대기`}
+          badge={`${pendingGroups.length}곡 대기`}
           action={
-            pending.length > 5 ? { label: "전체 보기", onClick: () => onGoToList("pending") } : null
+            pendingGroups.length > 5
+              ? { label: "전체 보기", onClick: () => onGoToList("pending") }
+              : null
           }
         >
           {recentPending.length === 0 ? (
             <EmptyNote>검토할 신청이 없습니다.</EmptyNote>
           ) : (
-            recentPending.map((r) => (
-              <SongRow
-                key={r.id}
-                request={r}
-                meta={r.student_id === "방송부" ? "방송부 등록" : `${r.student_id}@ushs.hs.kr`}
-                warn={r.needs_review}
-                action={
-                  <button
-                    style={styles.rowApprove}
-                    onClick={() => onUpdate(r.id, { status: "approved" })}
-                  >
-                    승인
-                  </button>
-                }
-              />
-            ))
+            recentPending.map((g) => {
+              const r = g[0];
+              return (
+                <SongRow
+                  key={r.id}
+                  request={r}
+                  meta={
+                    g.length > 1
+                      ? `${g.length}명이 신청`
+                      : r.student_id === "방송부"
+                      ? "방송부 등록"
+                      : `${r.student_id}@ushs.hs.kr`
+                  }
+                  warn={g.some((x) => x.needs_review)}
+                  action={
+                    <button
+                      style={styles.rowApprove}
+                      onClick={() => onUpdate(g.map((x) => x.id), { status: "approved" })}
+                    >
+                      승인
+                    </button>
+                  }
+                />
+              );
+            })
           )}
         </Panel>
       </div>
@@ -642,16 +764,30 @@ function EmptyNote({ children }) {
   return <p style={styles.emptyNote}>{children}</p>;
 }
 
-function RequestCard({ request: r, onUpdate, onDelete, isMobile }) {
+function RequestCard({ group, onUpdate, onDelete, isMobile }) {
+  // 같은 곡을 여러 명이 신청했으면 group에 여러 건이 들어옵니다.
+  // 대표(r)는 가장 먼저 신청한 건이고, 처리는 항상 그룹 전체(ids)에 적용합니다.
+  const r = group[0];
+  const ids = group.map((x) => x.id);
+  const multi = group.length > 1;
+
   const [scheduledDate, setScheduledDate] = useState(r.scheduled_date || "");
   const [rejectReason, setRejectReason] = useState(r.reject_reason || "");
   const [showReject, setShowReject] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // 플래그는 그룹 안 어느 건에서든 걸렸으면 표시합니다.
+  // (같은 곡이라도 신청 시점에 따라 explicit 판정이 다르게 저장됐을 수 있습니다.)
   const flags = [];
-  if (r.itunes_explicit) flags.push("iTunes explicit");
-  if (r.musixmatch_explicit) flags.push("Musixmatch explicit");
-  if (r.keyword_flag) flags.push(`자체 사전: "${r.keyword_flag_reason}"`);
+  if (group.some((x) => x.itunes_explicit)) flags.push("iTunes explicit");
+  if (group.some((x) => x.musixmatch_explicit)) flags.push("Musixmatch explicit");
+  const kw = group.find((x) => x.keyword_flag);
+  if (kw) flags.push(`자체 사전: "${kw.keyword_flag_reason}"`);
+  const needsReview = group.some((x) => x.needs_review);
+
+  const requesters = group
+    .filter((x) => x.student_id !== "방송부")
+    .map((x) => x.student_id);
 
   return (
     <li style={styles.card}>
@@ -665,6 +801,7 @@ function RequestCard({ request: r, onUpdate, onDelete, isMobile }) {
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={styles.cardTitleRow}>
               <span style={styles.cardTitle}>{r.title}</span>
+              {multi && <span style={styles.countBadge}>{group.length}명이 신청</span>}
               {r.is_manual && r.student_id === "방송부" && (
                 <span style={styles.manualBadge}>방송부 직접 등록</span>
               )}
@@ -676,15 +813,24 @@ function RequestCard({ request: r, onUpdate, onDelete, isMobile }) {
             <div style={styles.cardMeta}>
               {r.student_id === "방송부"
                 ? `방송부 직접 등록 · ${new Date(r.created_at).toLocaleString("ko-KR")}`
+                : multi
+                ? `신청자 ${requesters.length}명: ${requesters.join(", ")} · 처음 신청 ${new Date(
+                    r.created_at
+                  ).toLocaleString("ko-KR")}`
                 : `신청자: ${r.student_id}@ushs.hs.kr · ${new Date(r.created_at).toLocaleString("ko-KR")}${
                     r.is_manual ? " · 검색 없이 직접 입력한 곡" : ""
                   }`}
             </div>
+            {multi && (
+              <div style={styles.groupHint}>
+                아래 처리는 {group.length}명 신청 전체에 함께 적용됩니다 (방송은 한 번만 나갑니다).
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {r.needs_review && (
+      {needsReview && (
         <div style={styles.warningBox}>
           ⚠ 확인 필요 — {flags.join(" · ")}
         </div>
@@ -708,7 +854,7 @@ function RequestCard({ request: r, onUpdate, onDelete, isMobile }) {
           <div style={{ ...styles.actionRow, flexDirection: isMobile ? "column" : "row" }}>
             <button
               style={{ ...styles.approveButton, width: isMobile ? "100%" : "auto" }}
-              onClick={() => onUpdate(r.id, { status: "approved" })}
+              onClick={() => onUpdate(ids, { status: "approved" })}
             >
               승인
             </button>
@@ -750,7 +896,7 @@ function RequestCard({ request: r, onUpdate, onDelete, isMobile }) {
                   style={{ ...styles.rejectButton, width: isMobile ? "100%" : "auto" }}
                   disabled={!rejectReason.trim()}
                   onClick={() => {
-                    onUpdate(r.id, { status: "rejected", rejectReason: rejectReason.trim() });
+                    onUpdate(ids, { status: "rejected", rejectReason: rejectReason.trim() });
                     setShowReject(false);
                   }}
                 >
@@ -776,7 +922,7 @@ function RequestCard({ request: r, onUpdate, onDelete, isMobile }) {
           />
           <button
             style={{ ...styles.scheduleButton, width: isMobile ? "100%" : "auto" }}
-            onClick={() => onUpdate(r.id, { status: "scheduled", scheduledDate })}
+            onClick={() => onUpdate(ids, { status: "scheduled", scheduledDate })}
             disabled={!scheduledDate}
           >
             {r.status === "scheduled" ? "날짜 변경" : "이 날짜로 배정"}
@@ -784,7 +930,7 @@ function RequestCard({ request: r, onUpdate, onDelete, isMobile }) {
           {r.status === "scheduled" && (
             <button
               style={{ ...styles.playedButton, width: isMobile ? "100%" : "auto" }}
-              onClick={() => onUpdate(r.id, { status: "played" })}
+              onClick={() => onUpdate(ids, { status: "played" })}
             >
               방송 완료 처리
             </button>
@@ -804,7 +950,7 @@ function RequestCard({ request: r, onUpdate, onDelete, isMobile }) {
         {confirmDelete ? (
           <>
             <span style={styles.deleteConfirmText}>정말 삭제할까요? 되돌릴 수 없습니다.</span>
-            <button style={styles.deleteConfirmButton} onClick={() => onDelete(r.id)}>
+            <button style={styles.deleteConfirmButton} onClick={() => onDelete(ids)}>
               삭제 확정
             </button>
             <button style={styles.linkButton} onClick={() => setConfirmDelete(false)}>
@@ -827,6 +973,7 @@ function CalendarView({ requests, onUpdate, isMobile }) {
     return new Date(now.getFullYear(), now.getMonth(), 1);
   });
   const [pickerFor, setPickerFor] = useState(null);
+  const [pickerSort, setPickerSort] = useState("oldest"); // 배정 창 정렬 기준
 
   const year = monthCursor.getFullYear();
   const month = monthCursor.getMonth();
@@ -842,8 +989,16 @@ function CalendarView({ requests, onUpdate, isMobile }) {
       if (!scheduledByDate[r.scheduled_date]) scheduledByDate[r.scheduled_date] = [];
       scheduledByDate[r.scheduled_date].push(r);
     });
+  // 여러 명이 신청한 곡은 전원 승인되지만 방송은 한 번뿐이라, 달력에도 한 번만 표시합니다.
+  for (const date of Object.keys(scheduledByDate)) {
+    scheduledByDate[date] = dedupeBySong(scheduledByDate[date]);
+  }
 
-  const approvedUnscheduled = requests.filter((r) => r.status === "approved");
+  // 배정 후보도 곡 단위로 묶습니다. 같은 곡이 목록에 여러 번 뜨면 어느 걸 눌러야 할지 모호합니다.
+  const approvedGroups = sortGroups(
+    groupBySong(requests.filter((r) => r.status === "approved")),
+    pickerSort
+  );
 
   const cells = [];
   for (let i = 0; i < startWeekday; i++) cells.push(null);
@@ -881,7 +1036,7 @@ function CalendarView({ requests, onUpdate, isMobile }) {
             <div
               key={idx}
               style={{ ...styles.calendarCell, minHeight: isMobile ? 52 : 70 }}
-              onClick={() => approvedUnscheduled.length > 0 && setPickerFor(key)}
+              onClick={() => approvedGroups.length > 0 && setPickerFor(key)}
             >
               <div style={styles.calendarDayNum}>{day}</div>
               {songs.map((s) => (
@@ -895,7 +1050,7 @@ function CalendarView({ requests, onUpdate, isMobile }) {
         })}
       </div>
 
-      {approvedUnscheduled.length === 0 && (
+      {approvedGroups.length === 0 && (
         <p style={styles.hint}>배정 대기 중인 승인곡이 없습니다. 날짜 칸을 눌러도 배정할 곡이 없으면 반응하지 않습니다.</p>
       )}
 
@@ -903,14 +1058,20 @@ function CalendarView({ requests, onUpdate, isMobile }) {
         <div style={styles.modalOverlay} onClick={() => setPickerFor(null)}>
           <div style={styles.modalBox} onClick={(e) => e.stopPropagation()}>
             <h3 style={styles.modalTitle}>{pickerFor}에 배정할 곡 선택</h3>
+            {approvedGroups.length > 1 && (
+              <SortBar value={pickerSort} onChange={setPickerSort} />
+            )}
             <ul style={styles.list}>
-              {approvedUnscheduled.map((r) => (
-                <li key={r.id} style={styles.modalSongRow}>
-                  <span>{r.title} · {r.artist}</span>
+              {approvedGroups.map((g) => (
+                <li key={g[0].id} style={styles.modalSongRow}>
+                  <span>
+                    {g[0].title} · {g[0].artist}
+                    {g.length > 1 && <span style={styles.modalCount}> ({g.length}명)</span>}
+                  </span>
                   <button
                     style={styles.scheduleButton}
                     onClick={() => {
-                      onUpdate(r.id, { status: "scheduled", scheduledDate: pickerFor });
+                      onUpdate(g.map((x) => x.id), { status: "scheduled", scheduledDate: pickerFor });
                       setPickerFor(null);
                     }}
                   >
@@ -1596,6 +1757,62 @@ const styles = {
   cardTitle: {
     fontSize: 15,
     fontWeight: 700,
+  },
+  sortBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap",
+    marginBottom: 12,
+  },
+  sortLabel: {
+    fontSize: 12,
+    color: "var(--paper-dim)",
+    marginRight: 2,
+  },
+  sortButton: {
+    background: "none",
+    border: "1px solid var(--ink-line)",
+    color: "var(--paper-dim)",
+    borderRadius: 999,
+    padding: "5px 12px",
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  sortButtonActive: {
+    background: "var(--dawn)",
+    borderColor: "var(--dawn)",
+    color: "var(--ink)",
+  },
+  countBadge: {
+    fontSize: 10,
+    fontWeight: 700,
+    background: "rgba(255,180,84,0.15)",
+    color: "var(--dawn)",
+    border: "1px solid var(--dawn)",
+    borderRadius: 4,
+    padding: "1px 6px",
+    flexShrink: 0,
+  },
+  groupHint: {
+    fontSize: 11,
+    color: "var(--dawn)",
+    marginTop: 6,
+  },
+  groupNotice: {
+    fontSize: 12,
+    color: "var(--paper-dim)",
+    background: "var(--ink-soft)",
+    border: "1px solid var(--ink-line)",
+    borderRadius: 10,
+    padding: "9px 14px",
+    margin: "0 0 14px",
+    lineHeight: 1.6,
+  },
+  modalCount: {
+    color: "var(--paper-dim)",
+    fontSize: 12,
   },
   manualBadge: {
     fontSize: 10,
